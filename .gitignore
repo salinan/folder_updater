@@ -1,4 +1,6 @@
 config.json
+config copy.json
+last_sync.json
 __pycache__/
 *.pyc
 .env
@@ -9,3 +11,6 @@ versies/
 build/
 dist/
 *.spec
+*.log
+*.bat
+*.vbs

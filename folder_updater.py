@@ -149,7 +149,16 @@ class FolderUpdater:
             return False
     
     def _sync_root_files(self, source, target):
-        """Sync files directly in root directory"""
+        """
+        Sync files directly in root directory
+        
+        Root files are always synced (typically only a few files like
+        Calibre's metadata.db). This ensures important metadata files
+        are always current.
+        
+        Directory timestamp is preserved so that future scans can
+        correctly detect if root directory has changed.
+        """
         target.mkdir(parents=True, exist_ok=True)
         
         for item in source.iterdir():
@@ -162,9 +171,27 @@ class FolderUpdater:
                 except Exception as e:
                     logging.error(f"Error copying root file {item.name}: {e}")
                     self.stats['errors'] += 1
+        
+        # Preserve root directory timestamp
+        try:
+            source_stat = source.stat()
+            os.utime(target, (source_stat.st_atime, source_stat.st_mtime))
+        except Exception as e:
+            logging.warning(f"Could not preserve timestamp for root directory: {e}")
     
     def _scan_changed_directories(self, source, last_sync):
-        """Scan directory tree for directories modified since last sync"""
+        """
+        Scan directory tree for directories modified since last sync
+        
+        Uses directory modification time (mtime) which changes when:
+        - Files are added to the directory
+        - Files are removed from the directory
+        - Files are renamed in the directory
+        But NOT when file contents change (only the file's mtime changes)
+        
+        Returns:
+            List of Path objects for changed directories
+        """
         changed_dirs = []
         
         for dirpath, dirnames, filenames in os.walk(source):
@@ -190,7 +217,15 @@ class FolderUpdater:
         return changed_dirs
     
     def _sync_directory(self, source_root, target_root, source_dir):
-        """Sync all files in a directory from source to target"""
+        """
+        Sync all files in a directory from source to target
+        
+        Copies ALL files in the directory, even if only one changed.
+        This is the trade-off for fast detection without file hashing.
+        
+        Directory timestamp is preserved to ensure source and target
+        timestamps match, enabling correct incremental sync behavior.
+        """
         rel_path = source_dir.relative_to(source_root)
         target_dir = target_root / rel_path
         
@@ -214,11 +249,25 @@ class FolderUpdater:
                     logging.error(f"Error copying {item}: {e}")
                     self.stats['errors'] += 1
         
+        # Preserve directory timestamp
+        # This is critical: ensures target directory has same mtime as source
+        # Without this, every sync would re-sync all directories
+        try:
+            source_stat = source_dir.stat()
+            os.utime(target_dir, (source_stat.st_atime, source_stat.st_mtime))
+        except Exception as e:
+            logging.warning(f"Could not preserve timestamp for {target_dir}: {e}")
+        
         if file_count > 0:
             logging.info(f"Synced: {rel_path}/ ({file_count} files)")
     
     def _cleanup_target(self, source, target):
-        """Remove files and directories from target that don't exist in source"""
+        """
+        Remove files and directories from target that don't exist in source
+        
+        This keeps target as a perfect mirror of source, removing anything
+        that was deleted from source.
+        """
         if not target.exists():
             return
         
