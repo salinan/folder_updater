@@ -36,6 +36,7 @@ import os
 import shutil
 import json
 import logging
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -110,15 +111,27 @@ class FolderUpdater:
             'errors': 0
         }
     
-    def sync_configuration(self, config, last_sync):
-        """Sync a single source → target configuration"""
+    def sync_configuration(self, config, last_sync, state_manager):
+        """
+        Sync a single source → target configuration
+        
+        Args:
+            config: Configuration dict with 'name', 'source', 'target'
+            last_sync: datetime of last successful sync
+            state_manager: StateManager instance for saving progress
+        
+        Returns:
+            tuple: (success: bool, newest_synced: datetime)
+                   newest_synced is the timestamp of the newest synced directory
+                   This allows resuming after interruption
+        """
         source = Path(config['source'])
         target = Path(config['target'])
         name = config['name']
         
         if not source.exists():
             logging.error(f"Source does not exist: {source}")
-            return False
+            return False, last_sync
         
         logging.info(f"=" * 60)
         logging.info(f"Config: {name}")
@@ -128,25 +141,125 @@ class FolderUpdater:
         
         self.stats = {key: 0 for key in self.stats}
         
+        # Track newest synced directory timestamp for resume capability
+        newest_synced = last_sync
+        
         try:
             self._sync_root_files(source, target)
             changed_dirs = self._scan_changed_directories(source, last_sync)
             
+            total_dirs = len(changed_dirs)
             logging.info(f"Scanned {self.stats['dirs_scanned']} directories")
-            logging.info(f"Found {len(changed_dirs)} changed directories")
+            logging.info(f"Found {total_dirs} changed directories")
             
-            for dir_path in changed_dirs:
+            if total_dirs == 0:
+                logging.info("No changes detected - skipping sync")
+                self._cleanup_target(source, target)
+                self._log_stats()
+                return True, newest_synced
+            
+            # Progress tracking
+            start_time = datetime.now()
+            logging.info(f"Starting sync at {start_time.strftime('%H:%M:%S')}")
+            logging.info("=" * 60)
+            
+            # # Sync directories with periodic pauses and progress tracking
+            # for i, dir_path in enumerate(changed_dirs, 1):  # Start at 1 for better display
+            #     self._sync_directory(source, target, dir_path)
+                
+            #     # Track newest synced timestamp for resume capability
+            #     try:
+            #         dir_mtime = datetime.fromtimestamp(dir_path.stat().st_mtime)
+            #         if dir_mtime > newest_synced:
+            #             newest_synced = dir_mtime
+            #     except Exception as e:
+            #         logging.warning(f"Could not get timestamp for {dir_path}: {e}")
+                
+            #     # Progress every 10 directories
+            #     if i % 10 == 0:
+            #         elapsed = datetime.now() - start_time
+            #         percent = (i / total_dirs) * 100
+            #         rate = i / elapsed.total_seconds() if elapsed.total_seconds() > 0 else 0
+            #         eta_seconds = (total_dirs - i) / rate if rate > 0 else 0
+            #         eta = int(eta_seconds / 60)  # minutes
+                    
+            #         logging.info(f"Progress: {i}/{total_dirs} ({percent:.1f}%) | "
+            #                    f"Rate: {rate:.1f} dirs/sec | "
+            #                    f"ETA: ~{eta} min")
+            #         time.sleep(2)  # Short pause
+                
+            #     # Save + longer pause every 100 directories
+            #     if i % 100 == 0:
+            #         state_manager.set_last_sync(name, newest_synced)
+            #         logging.info("-" * 60)
+            #         logging.info(f"✓ CHECKPOINT: Progress saved to {newest_synced.strftime('%Y-%m-%d %H:%M:%S')}")
+            #         logging.info(f"✓ Safe to interrupt - will resume from directory {i+1}")
+            #         logging.info(f"⏸ Pausing 30 seconds for cloud sync to catch up...")
+            #         logging.info("-" * 60)
+            #         time.sleep(30)  # Longer pause for pCloud
+            
+            # In de sync_configuration methode, vervang de sync loop met:
+
+            # Sync directories with periodic pauses and progress tracking
+            for i, dir_path in enumerate(changed_dirs, 1):  # Start at 1 for better display
                 self._sync_directory(source, target, dir_path)
+                
+                # Track newest synced timestamp for resume capability
+                try:
+                    dir_mtime = datetime.fromtimestamp(dir_path.stat().st_mtime)
+                    if dir_mtime > newest_synced:
+                        newest_synced = dir_mtime
+                except Exception as e:
+                    logging.warning(f"Could not get timestamp for {dir_path}: {e}")
+                
+                # Progress every 10 directories
+                if i % 10 == 0:
+                    elapsed = datetime.now() - start_time
+                    percent = (i / total_dirs) * 100
+                    rate = i / elapsed.total_seconds() if elapsed.total_seconds() > 0 else 0
+                    eta_seconds = (total_dirs - i) / rate if rate > 0 else 0
+                    eta = int(eta_seconds / 60)  # minutes
+                    
+                    logging.info(f"Progress: {i}/{total_dirs} ({percent:.1f}%) | "
+                            f"Rate: {rate:.1f} dirs/sec | "
+                            f"ETA: ~{eta} min")
+                    time.sleep(2)  # Short pause
+                
+                # Save + longer pause every 50 directories (instead of 100)
+                if i % 50 == 0:
+                    state_manager.set_last_sync(name, newest_synced)
+                    logging.info("-" * 60)
+                    logging.info(f"✓ CHECKPOINT: Progress saved to {newest_synced.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logging.info(f"✓ Safe to interrupt - will resume from directory {i+1}")
+                    logging.info(f"⏸ Pausing 60 seconds for cloud sync to catch up...")
+                    logging.info("-" * 60)
+                    time.sleep(60)  # 60 seconds pause (was 30)
+
+
+
+            # Final progress update
+            elapsed = datetime.now() - start_time
+            logging.info("=" * 60)
+            logging.info(f"✓ All {total_dirs} directories synced in {elapsed}")
             
             self._cleanup_target(source, target)
             self._log_stats()
             
-            return True
+            return True, newest_synced
+            
+        except KeyboardInterrupt:
+            logging.info("=" * 60)
+            logging.info("⚠ INTERRUPTED BY USER")
+            logging.info(f"Progress saved to: {newest_synced.strftime('%Y-%m-%d %H:%M:%S')}")
+            logging.info("Run again to resume from this point")
+            logging.info("=" * 60)
+            return False, newest_synced
             
         except Exception as e:
             logging.error(f"Error syncing {name}: {e}")
             self.stats['errors'] += 1
-            return False
+            # Return partial progress even on failure
+            return False, newest_synced
     
     def _sync_root_files(self, source, target):
         """
@@ -271,6 +384,8 @@ class FolderUpdater:
         if not target.exists():
             return
         
+        logging.info("Starting cleanup phase...")
+        
         source_files = set()
         source_dirs = set()
         
@@ -323,7 +438,9 @@ class FolderUpdater:
     
     def _log_stats(self):
         """Log summary statistics"""
-        logging.info("-" * 60)
+        logging.info("=" * 60)
+        logging.info("SYNC STATISTICS")
+        logging.info("=" * 60)
         logging.info(f"Directories scanned: {self.stats['dirs_scanned']}")
         logging.info(f"Directories changed: {self.stats['dirs_changed']}")
         logging.info(f"Files synced: {self.stats['files_synced']}")
@@ -331,6 +448,7 @@ class FolderUpdater:
         logging.info(f"Directories deleted: {self.stats['dirs_deleted']}")
         logging.info(f"Data synced: {self._format_bytes(self.stats['bytes_synced'])}")
         logging.info(f"Errors: {self.stats['errors']}")
+        logging.info("=" * 60)
     
     @staticmethod
     def _format_bytes(bytes_count):
@@ -379,10 +497,18 @@ def main():
     for config in configurations:
         try:
             last_sync = state_manager.get_last_sync(config['name'])
-            success = updater.sync_configuration(config, last_sync)
+            success, newest_synced = updater.sync_configuration(
+                config, 
+                last_sync,
+                state_manager  # Pass for periodic saves
+            )
+            
+            # Always update last_sync timestamp, even on partial completion
+            # This allows resuming from where we left off after interruption
+            state_manager.set_last_sync(config['name'], newest_synced)
+            logging.info(f"Final save - Last sync updated to: {newest_synced.strftime('%Y-%m-%d %H:%M:%S')}")
             
             if success:
-                state_manager.set_last_sync(config['name'])
                 total_success += 1
             else:
                 total_failed += 1
@@ -400,3 +526,24 @@ def main():
 
 if __name__ == '__main__':
     main()
+# ```
+
+# **Belangrijkste wijzigingen:**
+
+# 1. **Elke 10 dirs:** Progress met rate & ETA
+# ```
+#    Progress: 100/55000 (1.8%) | Rate: 5.2 dirs/sec | ETA: ~176 min
+# ```
+
+# 2. **Elke 100 dirs:** Checkpoint met duidelijke feedback
+# ```
+#    ✓ CHECKPOINT: Progress saved to 2025-02-20 14:23:10
+#    ✓ Safe to interrupt - will resume from directory 101
+#    ⏸ Pausing 30 seconds for cloud sync to catch up...
+# ```
+
+# 3. **KeyboardInterrupt handling:** Ctrl+C wordt netjes afgehandeld
+# ```
+#    ⚠ INTERRUPTED BY USER
+#    Progress saved to: 2025-02-20 14:23:10
+#    Run again to resume from this point
